@@ -1,7 +1,6 @@
 package executor
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -154,37 +153,52 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		defer close(out)
 		defer httpResp.Body.Close()
 
-		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(nil, 1_048_576)
 		var param any
 		var inputTokens, outputTokens int
 
-		for scanner.Scan() {
-			line := scanner.Bytes()
-			if len(bytes.TrimSpace(line)) == 0 {
-				continue
+		// Read full response body then parse AWS EventStream frames
+		raw, err := io.ReadAll(httpResp.Body)
+		if err != nil {
+			reporter.PublishFailure(ctx)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: err}:
+			case <-ctx.Done():
 			}
+			return
+		}
 
-			// Parse Kiro event and convert to OpenAI SSE chunk
-			chunk, iTokens, oTokens := kiroEventToOpenAIChunk(line, baseModel)
-			inputTokens += iTokens
-			outputTokens += oTokens
-
-			if len(chunk) == 0 {
-				continue
+		pos := 0
+		for pos < len(raw) {
+			if pos+12 > len(raw) {
+				break
 			}
+			totalLen := int(raw[pos])<<24 | int(raw[pos+1])<<16 | int(raw[pos+2])<<8 | int(raw[pos+3])
+			headersLen := int(raw[pos+4])<<24 | int(raw[pos+5])<<16 | int(raw[pos+6])<<8 | int(raw[pos+7])
+			if totalLen < 16 || pos+totalLen > len(raw) {
+				break
+			}
+			payloadStart := pos + 12 + headersLen
+			payloadEnd := pos + totalLen - 4
+			if payloadEnd > payloadStart {
+				framePayload := raw[payloadStart:payloadEnd]
+				chunk, iTokens, oTokens := kiroEventToOpenAIChunk(framePayload, baseModel)
+				inputTokens += iTokens
+				outputTokens += oTokens
 
-			sseChunk := append([]byte("data: "), chunk...)
-			sseChunk = append(sseChunk, '\n', '\n')
-
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, sseChunk, &param)
-			for i := range chunks {
-				select {
-				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
-				case <-ctx.Done():
-					return
+				if len(chunk) > 0 {
+					sseChunk := append([]byte("data: "), chunk...)
+					sseChunk = append(sseChunk, '\n', '\n')
+					chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, sseChunk, &param)
+					for i := range chunks {
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+						case <-ctx.Done():
+							return
+						}
+					}
 				}
 			}
+			pos += totalLen
 		}
 
 		// Emit usage chunk
@@ -212,14 +226,6 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			case out <- cliproxyexecutor.StreamChunk{Payload: doneChunks[i]}:
 			case <-ctx.Done():
 				return
-			}
-		}
-
-		if errScan := scanner.Err(); errScan != nil {
-			reporter.PublishFailure(ctx)
-			select {
-			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
-			case <-ctx.Done():
 			}
 		}
 	}()
