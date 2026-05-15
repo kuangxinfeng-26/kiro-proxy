@@ -2064,5 +2064,62 @@
         ]
       }
     }
+  ],
+  "kiro": [
+    {
+      "id": "claude-haiku-4-5",
+      "object": "model",
+      "created": 1748736000,
+      "owned_by": "kiro",
+      "type": "kiro",
+      "display_name": "Claude Haiku 4.5 (Kiro)",
+      "description": "Fast and lightweight model via Kiro",
+      "context_length": 200000,
+      "max_completion_tokens": 8192
+    },
+    {
+      "id": "claude-sonnet-4-5",
+      "object": "model",
+      "created": 1748736000,
+      "owned_by": "kiro",
+      "type": "kiro",
+      "display_name": "Claude Sonnet 4.5 (Kiro)",
+      "description": "Balanced model via Kiro",
+      "context_length": 200000,
+      "max_completion_tokens": 16000
+    },
+    {
+      "id": "claude-sonnet-4-6",
+      "object": "model",
+      "created": 1748736000,
+      "owned_by": "kiro",
+      "type": "kiro",
+      "display_name": "Claude Sonnet 4.6 (Kiro)",
+      "description": "Latest Sonnet via Kiro",
+      "context_length": 200000,
+      "max_completion_tokens": 16000
+    },
+    {
+      "id": "claude-opus-4-5",
+      "object": "model",
+      "created": 1748736000,
+      "owned_by": "kiro",
+      "type": "kiro",
+      "display_name": "Claude Opus 4.5 (Kiro)",
+      "description": "Most capable model via Kiro",
+      "context_length": 200000,
+      "max_completion_tokens": 32000
+    },
+    {
+      "id": "kiro-smart",
+      "object": "model",
+      "created": 1748736000,
+      "owned_by": "kiro",
+      "type": "kiro",
+      "display_name": "Kiro Smart (Auto-route)",
+      "description": "Automatically routes to haiku/sonnet/opus based on task complexity",
+      "context_length": 200000,
+      "max_completion_tokens": 32000
+    }
   ]
 }
