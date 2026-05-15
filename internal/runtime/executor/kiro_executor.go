@@ -216,7 +216,7 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		}
 
 		if errScan := scanner.Err(); errScan != nil {
-			reporter.PublishFailure(ctx, errScan)
+			reporter.PublishFailure(ctx)
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
 			case <-ctx.Done():
@@ -262,6 +262,7 @@ func applyKiroHeaders(r *http.Request, token string, stream bool) {
 
 // buildKiroPayload converts an OpenAI-format JSON body to Kiro's generateAssistantResponse format.
 func buildKiroPayload(openaiBody []byte, model, profileARN string) ([]byte, error) {
+	model = kiroModelID(model)
 	conversationID := uuid.New().String()
 
 	// Extract messages from OpenAI format
@@ -410,38 +411,54 @@ func convertOpenAIToolsToKiro(tools []gjson.Result) []map[string]any {
 	return result
 }
 
-// collectKiroResponse reads all Kiro NDJSON events and returns the assembled content + token counts.
+// collectKiroResponse reads all Kiro AWS EventStream frames and returns the assembled content + token counts.
+// Kiro uses AWS EventStream binary framing: each frame is [totalLen(4)][headersLen(4)][prelude_crc(4)][headers][payload][message_crc(4)].
+// The payload JSON has the form {"content":"...","modelId":"..."} for text events.
 func collectKiroResponse(body io.Reader) (content string, inputTokens, outputTokens int) {
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(nil, 1_048_576)
+	raw, err := io.ReadAll(body)
+	if err != nil || len(raw) == 0 {
+		return "", 0, 0
+	}
 	var sb strings.Builder
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(bytes.TrimSpace(line)) == 0 {
-			continue
+	pos := 0
+	for pos < len(raw) {
+		if pos+12 > len(raw) {
+			break
 		}
-		var event map[string]any
-		if err := json.Unmarshal(line, &event); err != nil {
-			continue
+		totalLen := int(raw[pos])<<24 | int(raw[pos+1])<<16 | int(raw[pos+2])<<8 | int(raw[pos+3])
+		headersLen := int(raw[pos+4])<<24 | int(raw[pos+5])<<16 | int(raw[pos+6])<<8 | int(raw[pos+7])
+		if totalLen < 16 || pos+totalLen > len(raw) {
+			break
 		}
-		// Extract text content
-		if assistantMsg, ok := event["assistantResponseEvent"].(map[string]any); ok {
-			if text, ok := assistantMsg["content"].(string); ok {
-				sb.WriteString(text)
+		payloadStart := pos + 12 + headersLen
+		payloadEnd := pos + totalLen - 4
+		if payloadEnd > payloadStart {
+			var event map[string]any
+			if err := json.Unmarshal(raw[payloadStart:payloadEnd], &event); err == nil {
+				// Direct content field (assistantResponseEvent payload)
+				if text, ok := event["content"].(string); ok && text != "" {
+					sb.WriteString(text)
+				}
+				// Wrapped assistantResponseEvent (legacy)
+				if assistantMsg, ok := event["assistantResponseEvent"].(map[string]any); ok {
+					if text, ok := assistantMsg["content"].(string); ok {
+						sb.WriteString(text)
+					}
+				}
+				// Usage from messageMetadataEvent
+				if usage, ok := event["messageMetadataEvent"].(map[string]any); ok {
+					if u, ok := usage["usage"].(map[string]any); ok {
+						if v, ok := u["inputTokens"].(float64); ok {
+							inputTokens = int(v)
+						}
+						if v, ok := u["outputTokens"].(float64); ok {
+							outputTokens = int(v)
+						}
+					}
+				}
 			}
 		}
-		// Extract usage
-		if usage, ok := event["messageMetadataEvent"].(map[string]any); ok {
-			if u, ok := usage["usage"].(map[string]any); ok {
-				if v, ok := u["inputTokens"].(float64); ok {
-					inputTokens = int(v)
-				}
-				if v, ok := u["outputTokens"].(float64); ok {
-					outputTokens = int(v)
-				}
-			}
-		}
+		pos += totalLen
 	}
 	return sb.String(), inputTokens, outputTokens
 }
@@ -453,7 +470,17 @@ func kiroEventToOpenAIChunk(line []byte, model string) (chunk []byte, inputToken
 		return nil, 0, 0
 	}
 
-	// Text delta
+	// Text delta — direct content field (EventStream payload) or wrapped assistantResponseEvent
+	if text, ok := event["content"].(string); ok && text != "" {
+		sseData := map[string]any{
+			"id":      "chatcmpl-kiro",
+			"object":  "chat.completion.chunk",
+			"model":   model,
+			"choices": []map[string]any{{"index": 0, "delta": map[string]any{"role": "assistant", "content": text}, "finish_reason": nil}},
+		}
+		chunk, _ = json.Marshal(sseData)
+		return chunk, 0, 0
+	}
 	if assistantMsg, ok := event["assistantResponseEvent"].(map[string]any); ok {
 		if text, ok := assistantMsg["content"].(string); ok && text != "" {
 			sseData := map[string]any{
@@ -616,7 +643,22 @@ func (e *KiroExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth,
 // kiroModelID maps a model alias to the Kiro internal model ID.
 func kiroModelID(model string) string {
 	if strings.HasPrefix(strings.ToLower(model), "kiro-") {
-		return model[5:]
+		model = model[5:]
+	}
+	// Map OpenAI-style IDs (dashes) to Kiro internal IDs (dots for version numbers).
+	// e.g. claude-haiku-4-5 -> claude-haiku-4.5
+	kiroNames := map[string]string{
+		"claude-haiku-4-5":   "claude-haiku-4.5",
+		"claude-sonnet-4-5":  "claude-sonnet-4.5",
+		"claude-sonnet-4-6":  "claude-sonnet-4.6",
+		"claude-opus-4-5":    "claude-opus-4.5",
+		"claude-opus-4-6":    "claude-opus-4.6",
+		"claude-opus-4-7":    "claude-opus-4.7",
+		"claude-sonnet-4":    "claude-sonnet-4",
+		"claude-3-7-sonnet":  "claude-3.7-sonnet",
+	}
+	if mapped, ok := kiroNames[strings.ToLower(model)]; ok {
+		return mapped
 	}
 	return model
 }
