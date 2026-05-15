@@ -124,6 +124,11 @@ func tryRefreshModels(ctx context.Context, label string) {
 	// Detect changes before updating store.
 	changed := detectChangedProviders(oldData, parsed)
 
+	// Preserve locally-defined providers (e.g. kiro) that are absent from the remote catalog.
+	if len(parsed.Kiro) == 0 && oldData != nil && len(oldData.Kiro) > 0 {
+		parsed.Kiro = oldData.Kiro
+	}
+
 	// Update store with new data regardless.
 	modelsCatalogStore.mu.Lock()
 	modelsCatalogStore.data = parsed
