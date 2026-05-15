@@ -22,8 +22,8 @@ const SmartModel = "kiro-smart"
 // target models (Kiro uses Anthropic model IDs directly)
 const (
 	modelHaiku  = "claude-haiku-4-5"
-	modelSonnet = "claude-sonnet-4-5"
-	modelOpus   = "claude-opus-4-5"
+	modelSonnet = "claude-sonnet-4-6"
+	modelOpus   = "claude-opus-4-6"
 )
 
 // token thresholds (estimated from last user message char count / 4)
